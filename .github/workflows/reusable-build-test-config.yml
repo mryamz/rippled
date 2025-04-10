@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: ""
+      unittest_args:
+        description: 'Additional arguments to pass to rippled when running tests'
+        required: false
+        type: string
+        default: ""
       cmake_target:
         description: "The CMake target to build."
         type: string
@@ -75,3 +80,4 @@ jobs:
       image: ${{ inputs.image }}
       config_name: ${{ inputs.config_name }}
       nproc_subtract: ${{ inputs.nproc_subtract }}
+      unittest_args: ${{ inputs.unittest_args }}

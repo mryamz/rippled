@@ -11,6 +11,11 @@ on:
         description: "Whether to run unit tests"
         required: true
         type: boolean
+      unittest_args:
+        description: 'Additional arguments to pass to rippled when running tests'
+        required: false
+        type: string
+        default: ""
 
       runs_on:
         description: Runner to run the job on as a JSON string
@@ -83,7 +88,8 @@ jobs:
         env:
           BUILD_NPROC: ${{ steps.nproc.outputs.nproc }}
         run: |
-          ./rippled --unittest --unittest-jobs ${BUILD_NPROC}
+          ./rippled --unittest --unittest-jobs ${BUILD_NPROC} \
+            ${{ inputs.unittest_args }}
 
       - name: Run the separate tests
         if: ${{ inputs.run_tests }}
