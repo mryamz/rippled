@@ -1049,20 +1049,25 @@ computePaymentComponents(
         deltas.principalDelta <= currentLedgerState.principalOutstanding,
         "ripple::detail::computePaymentComponents",
         "principal delta not greater than outstanding");
+
     deltas.principalDelta = std::min(
         deltas.principalDelta, currentLedgerState.principalOutstanding);
+
     XRPL_ASSERT_PARTS(
         deltas.interestDueDelta <= currentLedgerState.interestDue,
         "ripple::detail::computePaymentComponents",
         "interest due delta not greater than outstanding");
+
     deltas.interestDueDelta = std::min(
         {deltas.interestDueDelta,
          std::max(Number::zero, roundedPeriodicPayment - deltas.principalDelta),
          currentLedgerState.interestDue});
+
     XRPL_ASSERT_PARTS(
         deltas.managementFeeDueDelta <= currentLedgerState.managementFeeDue,
         "ripple::detail::computePaymentComponents",
         "management fee due delta not greater than outstanding");
+
     deltas.managementFeeDueDelta = std::min(
         {deltas.managementFeeDueDelta,
          roundedPeriodicPayment -
@@ -1302,6 +1307,7 @@ computePaymentComponents(
         addressExcess(deltas, totalOverpayment);
         // LCOV_EXCL_STOP
     }
+
     // Make sure the parts don't add up to too much
     Number shortage = roundedPeriodicPayment - deltas.valueDelta;
 

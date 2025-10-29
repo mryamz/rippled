@@ -17,6 +17,8 @@
 */
 //==============================================================================
 
+#include <xrpl/beast/unit_test/suite.h>
+//
 #include <test/jtx.h>
 #include <test/jtx/mpt.h>
 
@@ -24,7 +26,7 @@
 #include <xrpld/app/misc/LoadFeeTrack.h>
 #include <xrpld/app/tx/detail/LoanSet.h>
 
-#include <xrpl/beast/unit_test/suite.h>
+#include <xrpl/beast/xor_shift_engine.h>
 #include <xrpl/protocol/SField.h>
 
 namespace ripple {
