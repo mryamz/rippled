@@ -32,6 +32,7 @@ namespace test {
 
 class Loan_test : public beast::unit_test::suite
 {
+protected:
     // Ensure that all the features needed for Lending Protocol are included,
     // even if they are set to unsupported.
     FeatureBitset const all{
@@ -91,7 +92,7 @@ class Loan_test : public beast::unit_test::suite
 
     struct BrokerParameters
     {
-        int vaultDeposit = 1'000'000;
+        Number vaultDeposit = 1'000'000;
         Number debtMax = 25'000;
         TenthBips32 coverRateMin = percentageToTenthBips(10);
         int coverDeposit = 1000;
@@ -914,6 +915,16 @@ class Loan_test : public beast::unit_test::suite
         }
     }
 
+    std::string
+    getCurrencyLabel(Asset const& asset)
+    {
+        return (
+            asset.native()                ? "XRP"
+                : asset.holds<Issue>()    ? "IOU"
+                : asset.holds<MPTIssue>() ? "MPT"
+                                          : "Unknown");
+    }
+
     /** Wrapper to run a series of lifecycle tests for a given asset and loan
      * amount
      *
@@ -935,13 +946,10 @@ class Loan_test : public beast::unit_test::suite
         using namespace jtx;
 
         auto const& asset = broker.asset.raw();
+        auto const currencyLabel = getCurrencyLabel(asset);
         auto const caseLabel = [&]() {
             std::stringstream ss;
-            ss << "Lifecycle: " << loanAmount << " "
-               << (asset.native()                ? "XRP"
-                       : asset.holds<Issue>()    ? "IOU"
-                       : asset.holds<MPTIssue>() ? "MPT"
-                                                 : "Unknown")
+            ss << "Lifecycle: " << loanAmount << " " << currencyLabel
                << " Scale interest to: " << interestExponent << " ";
             return ss.str();
         }();
@@ -1889,7 +1897,7 @@ class Loan_test : public beast::unit_test::suite
                         broker.asset, state.periodicPayment, state.loanScale)};
 
                 testcase
-                    << "\tPayment components: "
+                    << currencyLabel << "Payment components: "
                     << "Payments remaining, rawInterest, rawPrincipal, "
                        "rawMFee, trackedValueDelta, trackedPrincipalDelta, "
                        "trackedInterestDelta, trackedMgmtFeeDelta, special";
@@ -1930,7 +1938,8 @@ class Loan_test : public beast::unit_test::suite
                         state.principalOutstanding,
                         state.managementFeeOutstanding);
                     testcase
-                        << "\tLoan starting state: " << state.paymentRemaining
+                        << currencyLabel
+                        << "Loan starting state: " << state.paymentRemaining
                         << ", " << raw.interestDue << ", "
                         << raw.principalOutstanding << ", "
                         << raw.managementFeeDue << ", "
@@ -1999,22 +2008,23 @@ class Loan_test : public beast::unit_test::suite
                     detail::LoanDeltas const deltas =
                         currentTrueState - nextTrueState;
 
-                    testcase
-                        << "\tPayment components: " << state.paymentRemaining
-                        << ", " << deltas.interestDueDelta << ", "
-                        << deltas.principalDelta << ", "
-                        << deltas.managementFeeDueDelta << ", "
-                        << paymentComponents.trackedValueDelta << ", "
-                        << paymentComponents.trackedPrincipalDelta << ", "
-                        << paymentComponents.trackedInterestPart() << ", "
-                        << paymentComponents.trackedManagementFeeDelta << ", "
-                        << (paymentComponents.specialCase ==
-                                    detail::PaymentSpecialCase::final
-                                ? "final"
-                                : paymentComponents.specialCase ==
-                                    detail::PaymentSpecialCase::extra
-                                ? "extra"
-                                : "none");
+                    testcase << currencyLabel
+                             << "Payment components: " << state.paymentRemaining
+                             << ", " << deltas.interestDueDelta << ", "
+                             << deltas.principalDelta << ", "
+                             << deltas.managementFeeDueDelta << ", "
+                             << paymentComponents.trackedValueDelta << ", "
+                             << paymentComponents.trackedPrincipalDelta << ", "
+                             << paymentComponents.trackedInterestPart() << ", "
+                             << paymentComponents.trackedManagementFeeDelta
+                             << ", "
+                             << (paymentComponents.specialCase ==
+                                         detail::PaymentSpecialCase::final
+                                     ? "final"
+                                     : paymentComponents.specialCase ==
+                                         detail::PaymentSpecialCase::extra
+                                     ? "extra"
+                                     : "none");
 
                     auto const totalDueAmount = STAmount{
                         broker.asset,
@@ -2035,7 +2045,7 @@ class Loan_test : public beast::unit_test::suite
                         (diff > beast::zero &&
                          ((broker.asset.integral() &&
                            (static_cast<Number>(diff) < 3)) ||
-                          (totalDue.exponent() - diff.exponent() > 8))));
+                          (state.loanScale - diff.exponent() > 13))));
 
                     BEAST_EXPECT(
                         paymentComponents.trackedValueDelta ==
@@ -2863,6 +2873,259 @@ class Loan_test : public beast::unit_test::suite
             env(loanBroker::del(lender, broker.brokerID));
             env.close();
         }
+    }
+
+    void
+    makeLoanPayments(
+        jtx::Env& env,
+        BrokerInfo& broker,
+        LoanParameters const& loanParams,
+        Keylet const& loanKeylet,
+        VerifyLoanStatus const& verifyLoanStatus)
+    {
+        // toEndOfLife
+        //
+        // Draw and make multiple payments
+        using namespace jtx;
+        using namespace jtx::loan;
+        using namespace std::chrono_literals;
+
+        Account const issuer{"issuer"};
+        Account const lender{"lender"};
+        Account const borrower{"borrower"};
+        // Account const evan{"evan"};
+        // Account const alice{"alice"};
+
+        auto const currencyLabel = getCurrencyLabel(broker.asset);
+
+        env.close();
+        auto state = getCurrentState(env, broker, loanKeylet, verifyLoanStatus);
+
+        verifyLoanStatus(state);
+
+        // Periodic payment amount will consist of
+        // 1. principal outstanding (1000)
+        // 2. interest interest rate (at 12%)
+        // 3. payment interval (600s)
+        // 4. loan service fee (2)
+        // Calculate these values without the helper functions
+        // to verify they're working correctly The numbers in
+        // the below BEAST_EXPECTs may not hold across assets.
+        Number const interval = state.paymentInterval;
+        auto const periodicRate = loanPeriodicRate(
+            loanParams.interest.value_or(TenthBips32{0}),
+            loanParams.payInterval.value_or(LoanSet::defaultPaymentInterval));
+        STAmount const roundedPeriodicPayment{
+            broker.asset,
+            roundPeriodicPayment(
+                broker.asset, state.periodicPayment, state.loanScale)};
+
+        testcase << currencyLabel << "Payment components: "
+                 << "Payments remaining, rawInterest, rawPrincipal, "
+                    "rawMFee, trackedValueDelta, trackedPrincipalDelta, "
+                    "trackedInterestDelta, trackedMgmtFeeDelta, special";
+
+        auto const serviceFee = broker.asset(loanParams.serviceFee.value_or(0));
+
+        // Include the service fee
+        STAmount const totalDue = roundToScale(
+            roundedPeriodicPayment + serviceFee,
+            state.loanScale,
+            Number::upward);
+
+        {
+            auto const raw = calculateRawLoanState(
+                state.periodicPayment,
+                periodicRate,
+                state.paymentRemaining,
+                broker.params.managementFeeRate);
+            auto const rounded = calculateRoundedLoanState(
+                state.totalValue,
+                state.principalOutstanding,
+                state.managementFeeOutstanding);
+            testcase << currencyLabel
+                     << "Loan starting state: " << state.paymentRemaining
+                     << ", " << raw.interestDue << ", "
+                     << raw.principalOutstanding << ", " << raw.managementFeeDue
+                     << ", " << rounded.valueOutstanding << ", "
+                     << rounded.principalOutstanding << ", "
+                     << rounded.interestDue << ", " << rounded.managementFeeDue;
+        }
+
+        // Try to pay a little extra to show that it's _not_
+        // taken
+        STAmount const transactionAmount =
+            STAmount{broker.asset, totalDue} + broker.asset(10);
+
+        auto const initialState = state;
+        detail::PaymentComponents totalPaid{
+            .trackedValueDelta = 0,
+            .trackedPrincipalDelta = 0,
+            .trackedManagementFeeDelta = 0};
+        Number totalInterestPaid = 0;
+
+        ripple::LoanState currentTrueState = calculateRawLoanState(
+            state.periodicPayment,
+            periodicRate,
+            state.paymentRemaining,
+            broker.params.managementFeeRate);
+
+        while (state.paymentRemaining > 0)
+        {
+            // Compute the expected principal amount
+            auto const paymentComponents = detail::computePaymentComponents(
+                broker.asset.raw(),
+                state.loanScale,
+                state.totalValue,
+                state.principalOutstanding,
+                state.managementFeeOutstanding,
+                state.periodicPayment,
+                periodicRate,
+                state.paymentRemaining,
+                broker.params.managementFeeRate);
+
+            BEAST_EXPECT(
+                paymentComponents.trackedValueDelta == roundedPeriodicPayment ||
+                (paymentComponents.specialCase ==
+                     detail::PaymentSpecialCase::final &&
+                 paymentComponents.trackedValueDelta < roundedPeriodicPayment));
+            BEAST_EXPECT(
+                paymentComponents.trackedValueDelta ==
+                paymentComponents.trackedPrincipalDelta +
+                    paymentComponents.trackedInterestPart() +
+                    paymentComponents.trackedManagementFeeDelta);
+
+            ripple::LoanState const nextTrueState = calculateRawLoanState(
+                state.periodicPayment,
+                periodicRate,
+                state.paymentRemaining - 1,
+                broker.params.managementFeeRate);
+            detail::LoanDeltas const deltas = currentTrueState - nextTrueState;
+
+            testcase << currencyLabel
+                     << "Payment components: " << state.paymentRemaining << ", "
+                     << deltas.interestDueDelta << ", " << deltas.principalDelta
+                     << ", " << deltas.managementFeeDueDelta << ", "
+                     << paymentComponents.trackedValueDelta << ", "
+                     << paymentComponents.trackedPrincipalDelta << ", "
+                     << paymentComponents.trackedInterestPart() << ", "
+                     << paymentComponents.trackedManagementFeeDelta << ", "
+                     << (paymentComponents.specialCase ==
+                                 detail::PaymentSpecialCase::final
+                             ? "final"
+                             : paymentComponents.specialCase ==
+                                 detail::PaymentSpecialCase::extra
+                             ? "extra"
+                             : "none");
+
+            auto const totalDueAmount = STAmount{
+                broker.asset,
+                paymentComponents.trackedValueDelta + serviceFee.number()};
+
+            // Due to the rounding algorithms to keep the interest and
+            // principal in sync with "true" values, the computed amount
+            // may be a little less than the rounded fixed payment
+            // amount. For integral types, the difference should be < 3
+            // (1 unit for each of the interest and management fee). For
+            // IOUs, the difference should be dust.
+            Number const diff = totalDue - totalDueAmount;
+            BEAST_EXPECT(
+                paymentComponents.specialCase ==
+                    detail::PaymentSpecialCase::final ||
+                diff == beast::zero ||
+                (diff > beast::zero &&
+                 ((broker.asset.integral() &&
+                   (static_cast<Number>(diff) < 3)) ||
+                  (state.loanScale - diff.exponent() > 13))));
+
+            BEAST_EXPECT(
+                paymentComponents.trackedPrincipalDelta >= beast::zero &&
+                paymentComponents.trackedPrincipalDelta <=
+                    state.principalOutstanding);
+            BEAST_EXPECT(
+                paymentComponents.specialCase !=
+                    detail::PaymentSpecialCase::final ||
+                paymentComponents.trackedPrincipalDelta ==
+                    state.principalOutstanding);
+            BEAST_EXPECT(
+                paymentComponents.specialCase ==
+                    detail::PaymentSpecialCase::final ||
+                (state.loanScale -
+                 (deltas.principalDelta + deltas.interestDueDelta +
+                  deltas.managementFeeDueDelta - state.periodicPayment)
+                     .exponent()) > 14);
+
+            auto const borrowerBalanceBeforePayment =
+                env.balance(borrower, broker.asset);
+
+            // Make the payment
+            env(pay(borrower, loanKeylet.key, transactionAmount));
+
+            env.close();
+
+            // Need to account for fees if the loan is in XRP
+            PrettyAmount adjustment = broker.asset(0);
+            if (broker.asset.native())
+            {
+                adjustment = env.current()->fees().base;
+            }
+
+            // Check the result
+            verifyLoanStatus.checkPayment(
+                state.loanScale,
+                borrower,
+                borrowerBalanceBeforePayment,
+                totalDueAmount,
+                adjustment);
+
+            --state.paymentRemaining;
+            state.previousPaymentDate = state.nextPaymentDate;
+            if (paymentComponents.specialCase ==
+                detail::PaymentSpecialCase::final)
+            {
+                state.paymentRemaining = 0;
+            }
+            else
+            {
+                state.nextPaymentDate += state.paymentInterval;
+            }
+            state.principalOutstanding -=
+                paymentComponents.trackedPrincipalDelta;
+            state.managementFeeOutstanding -=
+                paymentComponents.trackedManagementFeeDelta;
+            state.totalValue -= paymentComponents.trackedValueDelta;
+
+            verifyLoanStatus(state);
+
+            totalPaid.trackedValueDelta += paymentComponents.trackedValueDelta;
+            totalPaid.trackedPrincipalDelta +=
+                paymentComponents.trackedPrincipalDelta;
+            totalPaid.trackedManagementFeeDelta +=
+                paymentComponents.trackedManagementFeeDelta;
+            totalInterestPaid += paymentComponents.trackedInterestPart();
+
+            currentTrueState = nextTrueState;
+        }
+
+        // Loan is paid off
+        BEAST_EXPECT(state.paymentRemaining == 0);
+        BEAST_EXPECT(state.principalOutstanding == 0);
+
+        // Make sure all the payments add up
+        BEAST_EXPECT(totalPaid.trackedValueDelta == initialState.totalValue);
+        BEAST_EXPECT(
+            totalPaid.trackedPrincipalDelta ==
+            initialState.principalOutstanding);
+        BEAST_EXPECT(
+            totalPaid.trackedManagementFeeDelta ==
+            initialState.managementFeeOutstanding);
+        // This is almost a tautology given the previous checks, but
+        // check it anyway for completeness.
+        BEAST_EXPECT(
+            totalInterestPaid ==
+            initialState.totalValue -
+                (initialState.principalOutstanding +
+                 initialState.managementFeeOutstanding));
     }
 
     void
@@ -4693,7 +4956,97 @@ public:
     }
 };
 
+class LoanBatch_test : public Loan_test
+{
+    enum AssetType { XRP = 0, IOU = 1, MPT = 2 };
+
+    beast::xor_shift_engine engine_;
+
+    std::uniform_int_distribution<> assetDist{0, 2};
+    std::uniform_int_distribution<std::int64_t> principalDist{
+        100'000,
+        10'000'000'000};
+    std::uniform_int_distribution<> interestRateDist{0, 10000};
+    std::uniform_int_distribution<> paymentTotalDist{12, 10000};
+    std::uniform_int_distribution<> paymentIntervalDist{60, 3600 * 24 * 30};
+    std::uniform_int_distribution<std::uint16_t> managementFeeRateDist{
+        0,
+        10'000};
+    std::uniform_int_distribution<> serviceFeeDist{0, 20};
+
+    void
+    testRandomLoan()
+    {
+        AssetType assetType = static_cast<AssetType>(assetDist(engine_));
+
+        // The size of the loan will determine how much we need to put into the
+        // vault
+        auto const principalRequest = principalDist(engine_);
+
+        BrokerParameters brokerParams{
+            .vaultDeposit = principalRequest * 10,
+            .debtMax = 0,
+            .coverRateMin = TenthBips32{0},
+            .managementFeeRate = TenthBips16{managementFeeRateDist(engine_)}};
+
+#if 0
+        LoanParameters loanParams{
+            .principalRequest = principalRequest,
+            .serviceFee = serviceFeeDist(engine_),
+            .interest = TenthBips32{interestRateDist(engine_)},
+            .payTotal = paymentTotalDist(engine_),
+        };
+#endif
+
+        /*
+                # Generate parameters that are more likely to be valid
+            principal = Decimal(str(rand.randint(100000,
+           100'000'000))).quantize(ROUND_TARGET)
+
+            interest_rate = Decimal(rand.randint(1, 10000)) / Decimal(100000)
+
+            payment_total = rand.randint(12, 10000)
+
+            payment_interval = Decimal(str(rand.randint(60, 2629746)))
+
+            interest_fee = Decimal(rand.randint(0, 100000)) / Decimal(100000)
+        */
+    }
+
+public:
+    void
+    run() override
+    {
+        auto const argument = arg();
+        auto const numIterations = [s = arg()]() -> int {
+            int defaultNum = 5;
+            if (s.empty())
+                return defaultNum;
+            try
+            {
+                std::size_t pos;
+                auto const r = stoi(s, &pos);
+                if (pos != s.size())
+                    return defaultNum;
+                return r;
+            }
+            catch (...)
+            {
+                return defaultNum;
+            }
+        }();
+
+        using namespace jtx;
+
+        for (int i = 0; i < numIterations; ++i)
+        {
+            testRandomLoan();
+        }
+    }
+};
+
 BEAST_DEFINE_TESTSUITE(Loan, tx, ripple);
+BEAST_DEFINE_TESTSUITE_MANUAL(LoanBatch, tx, ripple);
 
 }  // namespace test
 }  // namespace ripple
