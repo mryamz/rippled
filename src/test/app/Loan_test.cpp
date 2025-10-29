@@ -106,6 +106,13 @@ class Loan_test : public beast::unit_test::suite
 
             return debtLimit - currentDebt;
         }
+
+        static BrokerParameters const&
+        defaults()
+        {
+            static BrokerParameters const result{};
+            return result;
+        }
     };
 
     struct BrokerInfo
@@ -408,7 +415,7 @@ class Loan_test : public beast::unit_test::suite
         jtx::Env& env,
         jtx::PrettyAsset const& asset,
         jtx::Account const& lender,
-        BrokerParameters const& params = {})
+        BrokerParameters const& params = BrokerParameters::defaults())
     {
         using namespace jtx;
 
