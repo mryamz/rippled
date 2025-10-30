@@ -1074,11 +1074,6 @@ computePaymentComponents(
              (deltas.principalDelta + deltas.interestDueDelta),
          currentLedgerState.managementFeeDue});
 
-    // In case any adjustments were made (or if the original rounding didn't
-    // quite add up right), recompute the total value delta
-    deltas.valueDelta = deltas.principalDelta + deltas.interestDueDelta +
-        deltas.managementFeeDueDelta;
-
     if (paymentRemaining == 1 ||
         totalValueOutstanding <= roundedPeriodicPayment)
     {
@@ -1086,7 +1081,7 @@ computePaymentComponents(
         // parts.
 
         XRPL_ASSERT_PARTS(
-            deltas.valueDelta == totalValueOutstanding,
+            deltas.valueDelta() == totalValueOutstanding,
             "ripple::detail::computePaymentComponents",
             "last payment total value agrees");
         XRPL_ASSERT_PARTS(
@@ -1205,13 +1200,12 @@ computePaymentComponents(
     // trying to take more than the whole payment. The excess can be positive,
     // which indicates that we're not going to take the whole payment amount,
     // but if so, it must be small.
-    auto takeFrom = [](Number& total, Number& component, Number& excess) {
+    auto takeFrom = [](Number& component, Number& excess) {
         if (excess > beast::zero)
         {
             // Take as much of the excess as we can out of the provided part and
             // the total
             auto part = std::min(component, excess);
-            total -= part;
             component -= part;
             excess -= part;
         }
@@ -1222,31 +1216,28 @@ computePaymentComponents(
             "ripple::detail::computePaymentComponents",
             "excess non-negative");
     };
-    auto giveTo = [](Number& total,
-                     Number& component,
-                     Number& shortage,
-                     Number const& maximum) {
-        if (shortage > beast::zero)
-        {
-            // Put as much of the shortage as we can into the provided part and
-            // the total
-            auto part = std::min(maximum - component, shortage);
-            total += part;
-            component += part;
-            shortage -= part;
-        }
-        // If the shortage goes negative, we put too much, which should be
-        // impossible
-        XRPL_ASSERT_PARTS(
-            shortage >= beast::zero,
-            "ripple::detail::computePaymentComponents",
-            "excess non-negative");
-    };
+    auto giveTo =
+        [](Number& component, Number& shortage, Number const& maximum) {
+            if (shortage > beast::zero)
+            {
+                // Put as much of the shortage as we can into the provided part
+                // and the total
+                auto part = std::min(maximum - component, shortage);
+                component += part;
+                shortage -= part;
+            }
+            // If the shortage goes negative, we put too much, which should be
+            // impossible
+            XRPL_ASSERT_PARTS(
+                shortage >= beast::zero,
+                "ripple::detail::computePaymentComponents",
+                "excess non-negative");
+        };
     auto addressExcess = [&takeFrom](LoanDeltas& deltas, Number& excess) {
         // This order is based on where errors are the least problematic
-        takeFrom(deltas.valueDelta, deltas.interestDueDelta, excess);
-        takeFrom(deltas.valueDelta, deltas.managementFeeDueDelta, excess);
-        takeFrom(deltas.valueDelta, deltas.principalDelta, excess);
+        takeFrom(deltas.interestDueDelta, excess);
+        takeFrom(deltas.managementFeeDueDelta, excess);
+        takeFrom(deltas.principalDelta, excess);
     };
     auto addressShortage = [&giveTo, &trueTarget](
                                LoanDeltas& deltas,
@@ -1274,21 +1265,16 @@ computePaymentComponents(
             {
                 case principal:
                     giveTo(
-                        deltas.valueDelta,
                         deltas.principalDelta,
                         shortage,
                         current.principalOutstanding);
                     break;
                 case interest:
                     giveTo(
-                        deltas.valueDelta,
-                        deltas.interestDueDelta,
-                        shortage,
-                        current.interestDue);
+                        deltas.interestDueDelta, shortage, current.interestDue);
                     break;
                 case fee:
                     giveTo(
-                        deltas.valueDelta,
                         deltas.managementFeeDueDelta,
                         shortage,
                         current.managementFeeDue);
@@ -1297,7 +1283,7 @@ computePaymentComponents(
         }
     };
     Number totalOverpayment =
-        deltas.valueDelta - currentLedgerState.valueOutstanding;
+        deltas.valueDelta() - currentLedgerState.valueOutstanding;
     if (totalOverpayment > beast::zero)
     {
         // LCOV_EXCL_START
@@ -1309,7 +1295,7 @@ computePaymentComponents(
     }
 
     // Make sure the parts don't add up to too much
-    Number shortage = roundedPeriodicPayment - deltas.valueDelta;
+    Number shortage = roundedPeriodicPayment - deltas.valueDelta();
 
     XRPL_ASSERT_PARTS(
         isRounded(asset, shortage, scale),
@@ -1342,20 +1328,22 @@ computePaymentComponents(
         "ripple::detail::computePaymentComponents",
         "no shortage or excess");
 #if LOANCOMPLETE
+    /*
     // This used to be part of the above assert. It will eventually be removed
     // if proved accurate
     ||
         (shortage > beast::zero &&
          ((asset.integral() && shortage < 3) ||
           (scale - shortage.exponent() > 14)))
+          */
 #endif
 
-            XRPL_ASSERT_PARTS(
-                deltas.valueDelta ==
-                    deltas.principalDelta + deltas.interestDueDelta +
-                        deltas.managementFeeDueDelta,
-                "ripple::detail::computePaymentComponents",
-                "total value adds up");
+    XRPL_ASSERT_PARTS(
+        deltas.valueDelta() ==
+            deltas.principalDelta + deltas.interestDueDelta +
+                deltas.managementFeeDueDelta,
+        "ripple::detail::computePaymentComponents",
+        "total value adds up");
 
     XRPL_ASSERT_PARTS(
         deltas.principalDelta >= beast::zero &&
@@ -1382,7 +1370,7 @@ computePaymentComponents(
         // As a final safety check, ensure the value is non-negative, and won't
         // make the corresponding item negative
         .trackedValueDelta = std::clamp(
-            deltas.valueDelta,
+            deltas.valueDelta(),
             Number::zero,
             currentLedgerState.valueOutstanding),
         .trackedPrincipalDelta = std::clamp(
@@ -1450,7 +1438,6 @@ detail::LoanDeltas
 operator-(LoanState const& lhs, LoanState const& rhs)
 {
     detail::LoanDeltas result{
-        .valueDelta = lhs.valueOutstanding - rhs.valueOutstanding,
         .principalDelta = lhs.principalOutstanding - rhs.principalOutstanding,
         .interestDueDelta = lhs.interestDue - rhs.interestDue,
         .managementFeeDueDelta = lhs.managementFeeDue - rhs.managementFeeDue,
@@ -1463,7 +1450,7 @@ LoanState
 operator-(LoanState const& lhs, detail::LoanDeltas const& rhs)
 {
     LoanState result{
-        .valueOutstanding = lhs.valueOutstanding - rhs.valueDelta,
+        .valueOutstanding = lhs.valueOutstanding - rhs.valueDelta(),
         .principalOutstanding = lhs.principalOutstanding - rhs.principalDelta,
         .interestDue = lhs.interestDue - rhs.interestDueDelta,
         .managementFeeDue = lhs.managementFeeDue - rhs.managementFeeDueDelta,

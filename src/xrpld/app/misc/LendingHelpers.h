@@ -205,16 +205,19 @@ struct PaymentComponents
 
 struct LoanDeltas
 {
-    Number valueDelta;
     Number principalDelta;
     Number interestDueDelta;
     Number managementFeeDueDelta;
 
+    Number
+    valueDelta() const
+    {
+        return principalDelta + interestDueDelta + managementFeeDueDelta;
+    }
+
     void
     nonNegative()
     {
-        if (valueDelta < beast::zero)
-            valueDelta = Number::zero;
         if (principalDelta < beast::zero)
             principalDelta = Number::zero;
         if (interestDueDelta < beast::zero)
