@@ -1,0 +1,133 @@
+# Security Audit Findings - XLS-66 Lending Protocol
+
+## Finding 1: No Upper Bound on PaymentTotal (DoS Risk)
+
+### Severity: MEDIUM
+
+### Location
+`src/xrpld/app/tx/detail/LoanSet.cpp:101-103`
+
+### Description
+The `PaymentTotal` field in LoanSet transactions only validates that the value is greater than zero, but does NOT enforce an upper bound. This allows an attacker to specify an extremely large number of payments (up to UINT32_MAX = 4,294,967,295).
+
+```cpp
+if (auto const paymentTotal = tx[~sfPaymentTotal];
+    paymentTotal && *paymentTotal <= 0)
+    return temINVALID;
+```
+
+### Impact
+
+**Computational DoS**: When creating a loan with a very large `PaymentTotal`, the `loanPeriodicPayment()` function calls:
+```cpp
+computeRaisedRate(periodicRate, paymentsRemaining)
+  -> power(1 + periodicRate, paymentsRemaining)
+```
+
+The `power()` function uses recursive exponentiation by squaring, requiring log2(n) stack frames. For n = 4 billion, this means ~32 recursive calls, which is manageable.
+
+**However**, the multiplication operations within power() could:
+1. Take significant CPU time for very large exponents
+2. Potentially overflow the Number type (though unlikely at realistic interest rates)
+3. If overflow occurs, throw `std::overflow_error` exception
+
+**Exception Handling Risk**: If an exception is thrown during transaction processing and not properly caught, it could:
+- Cause transaction failure in an uncontrolled manner
+- Potentially disrupt consensus if validators handle it differently
+- Be used as a griefing attack to waste validator resources
+
+### Proof of Concept
+
+An attacker creates a LoanSet transaction with:
+- `PaymentTotal = 4294967295` (MAX_UINT32)
+- `PaymentInterval = 60` (minimum, 60 seconds)
+- `InterestRate = 100000` (100% annual, maximum)
+
+This would cause the validator to:
+1. Compute `periodicRate ≈ 0.00019025875`
+2. Attempt to calculate `(1.00019025875)^4294967295`
+3. Require 32 levels of recursion
+4. Perform ~32 multiplication operations on increasingly large Numbers
+
+While the Number type can theoretically handle this (maxExponent = 32768), the computation is unnecessary and wasteful.
+
+### Practical Overflow Calculation
+
+At maximum interest rate (100% annual) with minimum interval (60s):
+- Overflow occurs around n = 396,415,097 payments
+- This represents ~754 years of payments
+- Still within UINT32_MAX range!
+
+At smaller rates, overflow would require even more payments.
+
+### Recommendation
+
+**Add an upper bound to PaymentTotal**:
+
+```cpp
+// In LoanSet.h
+static std::uint32_t constexpr maxPaymentTotal = 10'000'000; // 10 million max
+static_assert(maxPaymentTotal >= minPaymentTotal);
+
+// In LoanSet.cpp preflight()
+if (auto const paymentTotal = tx[~sfPaymentTotal])
+{
+    if (*paymentTotal <= 0 || *paymentTotal > maxPaymentTotal)
+        return temINVALID;
+}
+```
+
+**Rationale for 10 million**:
+- With 60s intervals: 10M payments = ~19 years
+- With 1 day intervals: 10M payments = ~27,397 years
+- Reasonable upper bound for any legitimate loan
+- Prevents computational waste
+- Far below overflow thresholds
+
+**Alternative**: Add try-catch around computeLoanProperties() to handle overflow gracefully:
+
+```cpp
+try {
+    auto const loanProps = computeLoanProperties(...);
+} catch (const std::overflow_error& e) {
+    JLOG(ctx.j.warning()) << "Loan computation overflow: " << e.what();
+    return tecINTERNAL; // or appropriate error code
+}
+```
+
+### References
+- `src/xrpld/app/misc/detail/LendingHelpers.cpp:81-102` (computeRaisedRate, computePaymentFactor)
+- `src/libxrpl/basics/Number.cpp` (power function, overflow handling)
+- XLS-66 Specification Section 3.2.4.1.1 (Regular Payment formula)
+
+### Test Case Needed
+
+```cpp
+// Test with maximum PaymentTotal
+Env env(*this);
+// ... setup accounts, vault, broker ...
+env(loan::set(borrower, lender)
+    ["Asset"](asset)
+    ["Principal"](principal)
+    ["PaymentTotal"](4294967295)  // MAX_UINT32
+    ["PaymentInterval"](60)
+    ["InterestRate"](100000),
+    ter(???));  // Should fail with temINVALID if fix applied
+```
+
+---
+
+## Analysis Status
+
+**Functions Analyzed**:
+- ✓ `loanPeriodicRate()`
+- ✓ `loanPeriodicPayment()`
+- ✓ `computeRaisedRate()`
+- ✓ `computePaymentFactor()`
+- ✓ `power(Number, unsigned)`
+
+**Next Functions to Analyze**:
+- `computePaymentComponents()` - Payment split logic
+- `LoanPay::doApply()` - Payment processing
+- `LoanSet::checkSign()` - Signature verification
+- `LoanBrokerCoverWithdraw::preclaim()` - Collateral checks
