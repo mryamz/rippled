@@ -1,8 +1,20 @@
 # Security Audit Findings - XLS-66 Lending Protocol
 
+**Competition**: Immunefi XRPL Ripple Attackathon
+**Target**: XLS-66 Lending Protocol Implementation
+**Branch**: `ximinez/lending-XLS-66`
+
+---
+
 ## Finding 1: No Upper Bound on PaymentTotal (DoS Risk)
 
-### Severity: MEDIUM
+**Severity**: 🟡 MEDIUM
+**Category**: Denial of Service / Resource Exhaustion
+**CVE**: N/A
+
+### TL;DR
+
+The `PaymentTotal` field in LoanSet transactions lacks an upper bound, allowing attackers to specify up to 4.2 billion payments. This forces validators to compute `power(1+rate, 4billion)` during loan creation, causing excessive CPU usage through 32 levels of recursion and ~32 multiplication operations on large Number types. While unlikely to cause overflow at realistic interest rates, this enables computational DoS attacks and potential unhandled exceptions that could disrupt consensus.
 
 ### Location
 `src/xrpld/app/tx/detail/LoanSet.cpp:101-103`
