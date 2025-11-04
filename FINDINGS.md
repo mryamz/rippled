@@ -140,11 +140,13 @@ env(loan::set(borrower, lender)
 - ✓ `computePaymentComponents()` - Calls calculateRawLoanState → loanPrincipalFromPeriodicPayment → power(), affected by Finding #1
 - ✓ `LoanPay::doApply()` - Well-defended with extensive validation and fund conservation checks, affected by Finding #1 when processing payments
 - ✓ `LoanSet::checkSign()` - Secure multi-party signature verification with proper authorization checks
+- ✓ `LoanSet::doApply()` - Loan creation with extensive guards, affected by Finding #1 at computeLoanProperties() call
 
 **Key Observations**:
 - **computePaymentComponents()**: Extensive defensive programming with UNREACHABLE blocks, assertions, and std::max guards. Allows small rounding tolerance (< 3 drops for XRP). No new critical vulnerability, but each payment computation triggers expensive power() call with large exponents.
 - **LoanPay::doApply()**: Proper input validation, authorization checks, and fund transfer logic. Debug builds include comprehensive fund conservation assertions. Can process up to 100 payments per transaction (loanMaximumPaymentsPerTransaction), amplifying the DoS risk from Finding #1.
 - **LoanSet::checkSign()**: Well-designed signature system. Preflight requires CounterpartySignature (except batch inner txns), preclaim enforces that one party must be broker owner, checkSign verifies cryptographic signatures. Properly handles multisig with correct fee calculation. No vulnerabilities found.
+- **LoanSet::doApply()**: Comprehensive loan creation with 4 precision guards, debt limit checks, first-loss capital requirements, and proper accounting (AssetsAvailable -= principal, AssetsTotal += interest, broker DebtTotal += principal + interest). Vulnerable at line 373-379 where computeLoanProperties() is called with potentially huge paymentTotal (Finding #1), no exception handling for overflow.
 
 **Next Functions to Analyze**:
 - `LoanSet::checkSign()` - Signature verification
