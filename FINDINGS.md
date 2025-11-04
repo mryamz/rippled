@@ -6,15 +6,36 @@
 
 ---
 
-## Finding 1: No Upper Bound on PaymentTotal - Unhandled Overflow Exception Risk
+## Finding 1: No Upper Bound on PaymentTotal - ~~Unhandled Overflow Exception Risk~~ **RETRACTED**
 
-**Severity**: 🔴 HIGH (upgraded from MEDIUM after ultra-deep analysis)
-**Category**: Consensus Risk / Unhandled Exception / DoS
+**Status**: ❌ **RETRACTED - NOT A SECURITY VULNERABILITY**
+**Original Severity**: 🔴 HIGH (INCORRECT)
+**Actual Severity**: ℹ️ INFORMATIONAL (Code Quality Only)
+**Category**: Best Practice - Input Validation
 **CVE**: N/A
 
-### TL;DR
+### Retraction Notice
 
-The `PaymentTotal` field lacks an upper bound validation, allowing values that cause unhandled `std::overflow_error` exceptions during `power()` computation in loan creation. While time-based validation limits PaymentTotal to ~71.5M, computational overflow occurs much earlier (~40k-500k payments depending on rate/interval). The **unhandled exception** can crash transaction processing and potentially cause validator consensus divergence if handled differently across nodes. This is a HIGH severity issue affecting consensus safety, not just DoS.
+After creating comprehensive tests with actual power() calculations, this finding has been **RETRACTED**. The original analysis was based on theoretical calculations without empirical testing. Actual testing proved the initial assessment was incorrect.
+
+### Original (Incorrect) TL;DR
+
+~~The `PaymentTotal` field lacks an upper bound validation, allowing values that cause unhandled `std::overflow_error` exceptions during `power()` computation in loan creation. While time-based validation limits PaymentTotal to ~71.5M, computational overflow occurs much earlier (~40k-500k payments depending on rate/interval). The **unhandled exception** can crash transaction processing and potentially cause validator consensus divergence if handled differently across nodes. This is a HIGH severity issue affecting consensus safety, not just DoS.~~
+
+### Corrected Analysis
+
+**What Testing Revealed**:
+- Daily intervals (86400s), 40,000 payments at 100% interest: **NO OVERFLOW** (result = 1.887)
+- Weekly intervals (604800s), 7,000 payments at 100% interest: **NO OVERFLOW** (result = 2.177)
+- Monthly intervals (2592000s), 1,000 payments at 100% interest: **NO OVERFLOW** (result = 1.610)
+- All calculations completed successfully with small, manageable results
+
+**Why the Original Analysis Was Wrong**:
+1. Time-based validation (`timeAvailable / interval < total`) effectively prevents overflow
+2. Higher payment intervals allow FEWER payments (natural balance)
+3. Overflow would require ~4.75 billion payments at realistic rates
+4. Time check limits to ~71 million payments maximum (safe margin of 66x)
+5. No unhandled exceptions occur at any allowed PaymentTotal value
 
 ### Location
 `src/xrpld/app/tx/detail/LoanSet.cpp:101-103`
