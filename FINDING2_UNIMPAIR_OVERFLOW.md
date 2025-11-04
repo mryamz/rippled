@@ -113,6 +113,23 @@ When `parentCloseTime` (current ledger time) approaches UINT32_MAX:
 
 ## Proof of Concept
 
+### Executable Test
+
+**Run the complete proof**: [`test_proofs/prove_unimpair_bug.cpp`](test_proofs/prove_unimpair_bug.cpp)
+
+```bash
+cd test_proofs
+g++ -o prove_unimpair_bug prove_unimpair_bug.cpp -std=c++17
+./prove_unimpair_bug
+```
+
+**Test Output Demonstrates**:
+- ✓ Normal operation (year 2025): $13,698 late fee for 10 days
+- ❌ Year 2136 overflow: $68,075,711 late fee for 15 days
+- ❌ **4,970x excessive fee** - proves the exploit
+
+### Code Snippet
+
 ```cpp
 // Year 2136 scenario
 std::uint32_t parentCloseTime = 4295000000u;  // Near UINT32_MAX
