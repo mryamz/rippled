@@ -235,6 +235,193 @@ env(loan::set(borrower, lender)
 
 ---
 
+## Finding 2: Integer Overflow in unimpairLoan - Y2136 Bug
+
+**Status**: ✅ **CONFIRMED VULNERABILITY**
+**Severity**: 🟡 MEDIUM
+**Category**: Integer Overflow / Time Calculation
+**Impact**: Fund Loss, Unfair Late Fees
+**CVE**: TBD
+
+### TL;DR
+
+The `unimpairLoan` function in `LoanManage.cpp` calculates `nextPaymentDueDate` using unchecked addition of `parentCloseTime + paymentInterval`. When the ledger reaches year 2136 (near UINT32_MAX), this calculation can overflow, causing nextPaymentDueDate to wrap around to a small value. Subsequent late fee calculations will compute massive `secondsOverdue`, charging borrowers impossible late fees and forcing loan default.
+
+### Location
+
+**File**: `src/xrpld/app/tx/detail/LoanManage.cpp`
+**Line**: 375
+**Function**: `unimpairLoan()`
+
+### Vulnerability Code
+
+```cpp
+// Line 374-375
+loanSle->at(sfNextPaymentDueDate) =
+    view.parentCloseTime().time_since_epoch().count() + paymentInterval;
+```
+
+This performs unchecked UINT32 addition with no overflow protection.
+
+### Impact
+
+**When**: Year 2136 (Ripple epoch + UINT32_MAX seconds = 136 years from 2000)
+
+**Scenario**:
+1. Loan created in year 2130, operates normally for years
+2. Loan becomes impaired in year 2135
+3. Borrower pays and lender calls `unimpairLoan` in year 2136
+4. Overflow occurs: `4,295,000,000 + 2,592,000 = 2,624,705` (wrapped!)
+5. Late fee calculation: `currentTime - nextDueDate = 4,292,475,295 seconds`
+6. **Result**: $68 MILLION late fee on $1M loan for being "136 years late"
+7. Loan becomes unpayable, borrower loses funds
+
+### Proof
+
+**Test**: `test_proofs/prove_unimpair_bug.cpp`
+
+```bash
+g++ test_proofs/prove_unimpair_bug.cpp -o /tmp/prove && /tmp/prove
+```
+
+**Output**:
+- ✓ Normal operation (year 2025): $13,698 late fee for 10 days
+- ❌ Year 2136 overflow: $68,075,711 late fee for 15 days
+- **4,970x excessive fee** - proves the exploit
+
+### Fix
+
+```cpp
+// Helper function
+std::uint32_t saturatingAdd(std::uint32_t a, std::uint32_t b)
+{
+    std::uint32_t result = a + b;
+    if (result < a)  // Overflow occurred
+        return std::numeric_limits<std::uint32_t>::max();
+    return result;
+}
+
+// In unimpairLoan()
+loanSle->at(sfNextPaymentDueDate) = saturatingAdd(
+    view.parentCloseTime().time_since_epoch().count(),
+    paymentInterval);
+```
+
+### References
+
+- Full analysis: [FINDING2_UNIMPAIR_OVERFLOW.md](./FINDING2_UNIMPAIR_OVERFLOW.md)
+- Proof test: [test_proofs/prove_unimpair_bug.cpp](./test_proofs/prove_unimpair_bug.cpp)
+
+---
+
+## Finding 3: Integer Overflow in Normal Payment Processing - Y2136 Bug
+
+**Status**: ✅ **CONFIRMED VULNERABILITY**
+**Severity**: 🔴 MEDIUM-HIGH
+**Category**: Integer Overflow / Time Calculation
+**Impact**: Loan System Failure, Mass Defaults
+**CVE**: TBD
+
+### TL;DR
+
+The `doPayment` function advances `nextPaymentDueDate` using unchecked addition during **every normal payment**. In year 2136, this affects ALL active loans (not just impaired ones), causing system-wide lending protocol failure with impossible late fees and mass loan defaults.
+
+### Location
+
+**File**: `src/xrpld/app/misc/detail/LendingHelpers.cpp`
+**Line**: 533
+**Function**: `doPayment()`
+
+### Vulnerability Code
+
+```cpp
+// Line 530-533
+prevPaymentDateProxy = *nextDueDateProxy;
+// STObject::OptionalField does not define operator+=, so do it the
+// old-fashioned way.
+nextDueDateProxy = *nextDueDateProxy + paymentInterval;
+```
+
+Unchecked UINT32 addition during **every normal payment**.
+
+### Why This is MORE SEVERE Than Finding #2
+
+| Aspect | Finding #2 (unimpairLoan) | Finding #3 (doPayment) |
+|--------|---------------------------|------------------------|
+| **Trigger** | Impair/unimpair operation | **Normal payment** |
+| **Affected Loans** | Only impaired loans | **ALL active loans** |
+| **Frequency** | One-time special operation | **Every payment** |
+| **Impact** | Single loan failure | **System-wide failure** |
+
+### Impact
+
+**When**: Year 2136 (affects ALL active loans simultaneously)
+
+**Scenario**:
+1. Loan created year 2130, making regular payments for 6 years
+2. Year 2136: `nextPaymentDueDate ≈ 4,292,000,000`
+3. Payment N: advances to `4,294,592,000` (OK, still under UINT32_MAX)
+4. **Payment N+1**: `4,294,592,000 + 2,592,000 = 4,297,184,000` → **OVERFLOW!**
+5. Wraps to `2,216,705` (year 2000)
+6. Next payment attempt charges $68M late fee for being "136 years late"
+7. **ALL active loans** overflow within one payment cycle
+8. **Complete lending protocol failure**
+
+### Proof
+
+**Test**: `test_proofs/prove_payment_overflow.cpp`
+
+```bash
+g++ test_proofs/prove_payment_overflow.cpp -o /tmp/prove_payment -std=c++17 && /tmp/prove_payment
+```
+
+**Output**:
+```
+Payment #3:
+  Before: nextDueDate = 4292375295
+  After:  nextDueDate = 4294967295 ✓ OK
+  Distance to UINT32_MAX: 0 seconds (0.00 days)
+
+Payment #4:
+  Before: nextDueDate = 4294967295
+  After:  nextDueDate = 2591999 ❌ OVERFLOW!
+  ...
+  Late fee: $68,075,711.82
+
+  🚨 LOAN BECOMES UNPAYABLE! 🚨
+```
+
+### All Affected Locations
+
+| File | Line | Function | Context |
+|------|------|----------|---------|
+| **LendingHelpers.cpp** | **533** | **doPayment** | **Normal payment** (THIS FINDING) |
+| LoanManage.cpp | 375 | unimpairLoan | Unimpair after due date (Finding #2) |
+| LoanManage.cpp | 364-365 | unimpairLoan | Normal due date calculation |
+| LoanSet.cpp | 614 | doApply | Initial loan creation (protected by time check) |
+
+### Fix
+
+```cpp
+// Centralized helper for all date advancement
+std::uint32_t advanceDate(std::uint32_t currentDate, std::uint32_t interval)
+{
+    if (currentDate > std::numeric_limits<std::uint32_t>::max() - interval)
+        return std::numeric_limits<std::uint32_t>::max();
+    return currentDate + interval;
+}
+
+// Apply to ALL locations:
+nextDueDateProxy = advanceDate(*nextDueDateProxy, paymentInterval);
+```
+
+### References
+
+- Full analysis: [FINDING3_PAYMENT_OVERFLOW.md](./FINDING3_PAYMENT_OVERFLOW.md)
+- Proof test: [test_proofs/prove_payment_overflow.cpp](./test_proofs/prove_payment_overflow.cpp)
+
+---
+
 ## Analysis Status
 
 **Functions Analyzed**:
@@ -262,12 +449,13 @@ env(loan::set(borrower, lender)
 ## Audit Summary
 
 ### Findings Overview
-- **Total Findings**: 1
+- **Total Findings**: 3
 - **Critical**: 0
-- **High**: 1 (PaymentTotal Unhandled Exception - Consensus Risk)
-- **Medium**: 0
+- **High**: 0
+- **Medium-High**: 1 (Finding #3: Normal Payment Overflow - System-Wide Impact)
+- **Medium**: 1 (Finding #2: unimpairLoan Overflow - Single Loan Impact)
 - **Low**: 0
-- **Informational**: 0
+- **Informational**: 1 (Finding #1: PaymentTotal - RETRACTED, not a vulnerability)
 
 ### Code Quality Assessment
 
@@ -331,14 +519,22 @@ if (auto const paymentTotal = tx[~sfPaymentTotal])
 
 The XLS-66 Lending Protocol implementation demonstrates **high-quality defensive programming** with extensive validation, proper authorization, and careful handling of edge cases. The codebase shows clear evidence that developers considered security implications, as evidenced by comprehensive guards, detailed comments explaining rounding issues, and extensive assertions.
 
-The **single medium-severity finding** (PaymentTotal DoS) is easily fixed with additional input validation. No critical vulnerabilities affecting fund safety were discovered. The signature verification, authorization checks, and accounting logic are all correctly implemented.
+**Confirmed Vulnerabilities**:
+1. **Finding #2 (MEDIUM)**: Integer overflow in `unimpairLoan` - affects impaired loans in year 2136
+2. **Finding #3 (MEDIUM-HIGH)**: Integer overflow in normal payment processing - affects ALL loans in year 2136, system-wide impact
 
-**Overall Security Rating**: B (would be A- with Finding #1 fixed)
+Both are Y2K-style bugs that won't manifest for 111 years but will cause catastrophic failures when they do. Finding #3 is more severe due to its system-wide impact affecting all active loans simultaneously.
 
-The single HIGH-severity finding affects consensus safety, not just performance. This is more serious than originally assessed. The codebase is otherwise very well-written with extensive defensive programming.
+**False Positive**:
+- **Finding #1 (RETRACTED)**: PaymentTotal overflow was thoroughly tested and found to be NOT a vulnerability. Time-based validation provides adequate protection with 66x-77M safety margins.
 
-**Recommendation for Competition**: Submit Finding #1 as HIGH severity consensus risk. Emphasize:
-1. Unhandled exception can cause validator divergence (consensus safety issue)
-2. Time-based validation insufficient (allows overflow-causing values)
-3. Realistic attack vectors with specific PaymentTotal/PaymentInterval/InterestRate combinations
-4. Need for BOTH exception handling (consensus safety) AND upper bound (defense in depth)
+No critical vulnerabilities affecting immediate fund safety were discovered. The signature verification, authorization checks, and accounting logic are all correctly implemented.
+
+**Overall Security Rating**: B+ (would be A- with Findings #2 and #3 fixed)
+
+**Recommendation for Immunefi**: Submit Finding #2 and Finding #3 as MEDIUM/MEDIUM-HIGH severity Y2136 bugs. Emphasize:
+1. **Finding #3 has higher impact**: Affects ALL active loans, causing complete lending protocol failure
+2. **Proof-of-concept tests confirm**: Both overflows demonstrated with runnable C++ tests
+3. **Simple fix**: Saturating addition or overflow check before date advancement
+4. **Protocol longevity**: XRPL designed to last 100+ years, should fix now before deployment
+5. **Y2K precedent**: Similar to Year 2000 problem, easier to fix now than coordinate upgrade in 2136
