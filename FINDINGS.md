@@ -137,9 +137,16 @@ env(loan::set(borrower, lender)
 - ✓ `computeRaisedRate()`
 - ✓ `computePaymentFactor()`
 - ✓ `power(Number, unsigned)`
+- ✓ `computePaymentComponents()` - Calls calculateRawLoanState → loanPrincipalFromPeriodicPayment → power(), affected by Finding #1
+- ✓ `LoanPay::doApply()` - Well-defended with extensive validation and fund conservation checks, affected by Finding #1 when processing payments
+
+**Key Observations**:
+- **computePaymentComponents()**: Extensive defensive programming with UNREACHABLE blocks, assertions, and std::max guards. Allows small rounding tolerance (< 3 drops for XRP). No new critical vulnerability, but each payment computation triggers expensive power() call with large exponents.
+- **LoanPay::doApply()**: Proper input validation, authorization checks, and fund transfer logic. Debug builds include comprehensive fund conservation assertions. Can process up to 100 payments per transaction (loanMaximumPaymentsPerTransaction), amplifying the DoS risk from Finding #1.
 
 **Next Functions to Analyze**:
-- `computePaymentComponents()` - Payment split logic
-- `LoanPay::doApply()` - Payment processing
 - `LoanSet::checkSign()` - Signature verification
+- `LoanSet::doApply()` - Loan creation logic
 - `LoanBrokerCoverWithdraw::preclaim()` - Collateral checks
+- `calculateRawLoanState()` - Loan state computation
+- `loanMakeFull Payment()` / `loanMakePayment()` - Payment calculation helpers
